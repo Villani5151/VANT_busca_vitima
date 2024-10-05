@@ -1,0 +1,346 @@
+#This code runs in R
+### Loading Necessary Libraries
+```R
+library("readxl")
+library("pomdp")
+library("dbplyr")
+library("dplyr")
+library("R.utils")
+library("ggplot2")
+print('Libraries loaded')
+```
+
+### Parameters for the Simulation
+```R
+n_VANTS = 3 # Number of UAVs
+sim_total = 30 # Total number of simulations
+y = 49 # Size of the scenario grid
+max_vit_quad = 100 # Maximum number of victims per quadrant
+start_quad = 'Q1' # Starting quadrant
+tempo_desloc = 10 # Travel time
+tempo_imagem = 0.8 # Image capture time
+num_sim = 1 # Initial number of simulations
+```
+
+### Initial Variables
+```R
+Base_resposta_consolidada = data.frame(matrix(nrow = 0, ncol = 0)) 
+```
+
+### Start Mission Repetitions
+```R
+repeat {
+  n_quadrante = 1
+  Base_resposta = data.frame(matrix(nrow = 0, ncol = 0)) 
+  matriz = matrix(1:y, nrow = sqrt(y), ncol = sqrt(y)) # Create scenario matrix
+  
+  matriz_ref = list()
+  for (column in 1:ncol(matriz)){
+    for (row in 1:nrow(matriz)) {
+      matriz_ref = rbind(matriz_ref, data.frame(
+        "State"=matriz[row, column],
+        "Estado"=paste("Q", matriz[row, column], sep=""),
+        "Vitimas"= if(sample(0:1,1)<0.5){0}else{sample(1:max_vit_quad,1)},
+        "Risco"= sample(1:3,1),
+        "Acuracidade_mod_imagem"=rnorm(1,0.7705,0.049),
+        "Dir_Norte"= if(row-1==0){0}else{matriz[row-1, column]},
+        "Dir_Sul"=if(row+1==nrow(matriz)+1){0}else{matriz[row+1, column]},
+        "Dir_Leste"=if(column+1==ncol(matriz)+1){0}else{matriz[row, column+1]},
+        "Dir_Oeste"=if(column-1==0){0}else{matriz[row, column-1]},
+        "Dir_Nordeste"=if(row-1==0|column-1==0){0}else{matriz[row-1, column-1]},
+        "Dir_Noroeste"=if(row-1==0|column+1==ncol(matriz)+1){0}else{matriz[row-1, column+1]},
+        "Dir_Sudeste"=if(row+1==nrow(matriz)+1|column+1==ncol(matriz)+1){0}else{matriz[row+1, column+1]},
+        "Dir_Sudoeste"=if(row+1==nrow(matriz)+1|column-1==0){0}else{matriz[row+1, column-1]}
+      ))
+    }
+  }
+```
+
+### Setting Initial Conditions
+```R
+matriz_ref$Start = ifelse(matriz_ref$Estado == start_quad, 1, 0)
+matriz_ref$Belief = round(matriz_ref$Risco/sum(matriz_ref$Risco), 20)
+
+matriz_ref = rbind(data.frame(
+  "State" = 0, "Estado" = "Q0", "Start" = 0, "Vitimas" = 0, "Risco" = 0,
+  "Acuracidade_mod_imagem"=0, "Belief" = 0, "Dir_Norte" = 0, "Dir_Sul" = 0,
+  "Dir_Oeste" = 0, "Dir_Leste" = 0, "Dir_Nordeste" = 0, "Dir_Noroeste" = 0,
+  "Dir_Sudeste" = 0, "Dir_Sudoeste" = 0), matriz_ref)
+
+matriz_ref$Estado <- as.character(matriz_ref$Estado)
+```
+
+### Creating Transition Matrices
+```R
+col_tran = list("Norte","Sul","Oeste","Leste","Nordeste","Noroeste","Sudeste","Sudoeste")
+for (column in col_tran){
+  limite = nrow(matriz_ref)
+  for (row in 1:limite) {
+    lista_sup = as.list(rep(0, y+1))
+    lista_sup[[matriz_ref[row, paste("Dir_", column, sep = "")] + 1]] = 1
+    matriz_ref[row, column] = paste("c(", paste(lista_sup, sep = ',', collapse = ','), ')')
+  }
+}
+
+col_obs_pro = list("Norte_obs","Sul_obs","Oeste_obs","Leste_obs","Nordeste_obs","Noroeste_obs","Sudeste_obs","Sudoeste_obs")
+for (x in 1:length(col_obs_pro)){
+  matriz_ref[col_obs_pro[[x]]] = paste("c(", matriz_ref$Belief, ",", 1 - matriz_ref$Belief, ")", sep = '')
+}
+```
+
+### Scenario Baseline
+```R
+Cenario_baseline = tail(matriz_ref, nrow(matriz_ref)-1)$Risco * tail(matriz_ref, nrow(matriz_ref)-1)$Vitimas
+```
+
+### Adjusting Matrices for Multiple UAVs
+```R
+# Example for 2 UAVs
+if (n_VANTS > 1) {
+  row_c1 = ceiling(nrow(matriz)/2)
+  row_c2 = nrow(matriz) - row_c1
+  C1 = matriz[1:row_c1, ]
+  C2 = tail(matriz, row_c2)
+
+  # Section 1 for UAV 1
+  matriz_ref1 = list()
+  for (column in 1:ncol(C1)){
+    for (row in 1:nrow(C1)) {
+      matriz_ref1 = rbind(matriz_ref1, data.frame(
+        "State"=C1[row, column],
+        "Estado"=paste("Q", C1[row, column], sep=""),
+        "Vitimas"=matriz_ref[matriz_ref$State == C1[row, column], ]$Vitimas,
+        "Risco"=matriz_ref[matriz_ref$State == C1[row, column], ]$Risco,
+        "Acuracidade_mod_imagem"=matriz_ref[matriz_ref$State == C1[row, column], ]$Acuracidade_mod_imagem,
+        "Dir_Norte"= if(row-1==0){0}else{C1[row-1, column]},
+        "Dir_Sul"=if(row+1==nrow(C1)+1){0}else{C1[row+1, column]},
+        "Dir_Leste"=if(column+1==ncol(C1)+1){0}else{C1[row, column+1]},
+        "Dir_Oeste"=if(column-1==0){0}else{C1[row, column-1]},
+        "Dir_Nordeste"=if(row-1==0|column-1==0){0}else{C1[row-1, column-1]},
+        "Dir_Noroeste"=if(row-1==0|column+1==ncol(C1)+1){0}else{C1[row-1, column+1]},
+        "Dir_Sudeste"=if(row+1==nrow(C1)+1|column+1==ncol(C1)+1){0}else{C1[row+1, column+1]},
+        "Dir_Sudoeste"=if(row+1==nrow(C1)+1|column-1==0){0}else{C1[row+1, column-1]}
+      ))
+    }
+  }
+
+  matriz_ref1$Start = ifelse(matriz_ref1$Estado == start_quad, 1, 0)
+  matriz_ref1$Belief = round(matriz_ref1$Risco/sum(matriz_ref1$Risco), 20)
+  matriz_ref1 = rbind(data.frame(
+    "State" = 0, "Estado" = "Q0", "Start" = 0, "Vitimas" = 0, "Risco" = 0,
+    "Acuracidade_mod_imagem"=0, "Belief" = 0, "Dir_Norte" = 0, "Dir_Sul" = 0,
+    "Dir_Oeste" = 0, "Dir_Leste" = 0, "Dir_Nordeste" = 0, "Dir_Noroeste" = 0,
+    "Dir_Sudeste" = 0, "Dir_Sudoeste" = 0), matriz_ref1)
+
+  matriz_ref1$Estado <- as.character(matriz_ref1$Estado)
+
+  col_tran = list("Norte","Sul","Oeste","Leste","Nordeste","Noroeste","Sudeste","Sudoeste")
+  numero_quadrantes = n_distinct(matriz_ref1$Estado)
+  for (column in col_tran){
+    limite = nrow(matriz_ref1)
+    for (row in 1:limite) {
+      lista_sup = as.list(rep(0, numero
+
+_quadrantes))
+      lista_sup[which(matriz_ref1$State == matriz_ref1[row, paste("Dir_", column, sep = "")])] = 1
+      matriz_ref1[row, column] = paste("c(", paste(lista_sup, sep = ',', collapse = ','), ')')
+    }
+  }
+
+  col_obs_pro = list("Norte_obs","Sul_obs","Oeste_obs","Leste_obs","Nordeste_obs","Noroeste_obs","Sudeste_obs","Sudoeste_obs")
+  for (x in 1:length(col_obs_pro)){
+    matriz_ref1[col_obs_pro[[x]]] = paste("c(", matriz_ref1$Belief, ",", 1 - matriz_ref1$Belief, ")", sep = '')
+  }
+
+  Cenario_baseline1 = tail(matriz_ref1, nrow(matriz_ref1)-1)$Risco * tail(matriz_ref1, nrow(matriz_ref1)-1)$Vitimas
+
+  # Section 2 for UAV 2
+  # Similar steps for UAV 2 with matriz_ref2 and Cenario_baseline2
+  
+}
+```
+
+### Adjusting for 3 UAVs
+Similar steps are followed as for 2 UAVs but adjusted for three sections.
+
+### Running the Optimizer
+```R
+repeat {
+  start.time = Sys.time()
+  Log_UAV$model$name = "Log_UAV"
+  Log_UAV$model$discount = 0.95
+  Log_UAV$model$horizon = 0
+  Log_UAV$model$time_limit = 0
+
+  Log_UAV$model$observations = factor(c("Achar_Vit","N_achar_vit"))
+  Log_UAV$model$states = factor(c(tran_prob$Estado))
+  Log_UAV$model$start = c(tran_prob$Start)
+  Log_UAV$model$belief_states = c(tran_prob$Belief)
+  Lista_acoes = factor(c("Norte", "Sul", "Leste", "Oeste", "Nordeste", "Noroeste", "Sudeste", "Sudoeste"))
+  Log_UAV$model$actions = Lista_acoes
+
+  'Transição'
+  'Norte'
+  lista = list()
+  for (row in tran_prob$Norte) {
+    x = eval(parse(text = row))
+    lista = rbind(lista,x)
+    rownames(lista) = NULL
+  }
+  Log_UAV$model$transition_prob$Norte = lista
+
+  # Similar steps for other directions
+
+  'Observações'
+  'Norte'
+  lista = list()
+  for (row in tran_prob$Norte_obs) {
+    x = eval(parse(text = row))
+    lista = rbind(lista,x)
+    rownames(lista) = NULL
+  }
+  Log_UAV$model$observation_prob$Norte = lista
+
+  # Similar steps for other directions
+
+  'Recompensa'
+  Log_UAV$model$reward = data.frame("Action" = c("*","*"),
+                                    "start.state" = c("*","*"),
+                                    "end.state" = c("*","*"),
+                                    "observation" = c("Achar_Vit","N_achar_vit"),
+                                    "value"=c(1,0))
+
+  # Functions to run the optimizer
+  n_state = tran_prob[tran_prob$Start == 1, ]$Estado
+
+  rodar_solver <- function(Log_UAV, tran_prob, n_state){
+    sol <- solve_POMDP(model = Log_UAV)
+    policy = data.frame(policy(sol))
+    policy_state = select(policy, n_state, action)
+    policy_state = policy_state[order(-policy_state[,1]), ]
+    cont = 1
+    repeat {
+      acao = policy_state[cont,][,2]
+      cont = cont +1
+      col = paste("Dir_", acao, sep = "")
+      dir = tran_prob[tran_prob$Estado == n_state,][[col]]
+      if(tran_prob[tran_prob$State == dir, ]$Risco != 0){
+        break
+      }
+    }
+    return (acao)
+  }
+
+  pular_solver <- function(tran_prob, n_state){
+    cont = 1
+    repeat {
+      acao = Lista_acoes[cont]
+      cont = cont +1
+      col = paste("Dir_", acao, sep = "")
+      dir = tran_prob[tran_prob$Estado == n_state,][[col]]
+      if(tran_prob[tran_prob$State == dir, ]$Risco != 0){
+        break
+      }
+    }
+    return (acao)
+  }
+
+  acao = tryCatch({
+    tryCatch({withTimeout(rodar_solver(Log_UAV, tran_prob, n_state),  timeout = 35)},
+             error = function(x) {pular_solver(tran_prob, n_state)})
+  }, error = function(x){acao = 'Pular quadrantes'})
+
+  tran_prob$risco_total = tran_prob$Vitimas * tran_prob$Risco
+  risco = sum(tran_prob$risco_total)
+  end.time = Sys.time()
+  time.taken = end.time - start.time
+  tempo_total = time.taken + tempo_imagem + tempo_desloc
+
+  Vitimas_inicial = sum(tran_prob$Vitimas)
+  if (nrow(Base_resposta) == 0) {
+    Flag_mod_imagem = rbinom(n=1, size=1, prob=tran_prob[tran_prob$Start == 1, ]$Acuracidade_mod_imagem)
+    Base_resposta = data.frame("Estado"=n_state, "Ação"=acao, "Risco" = risco, 
+                               "Tempo_iteracao" = time.taken, "Tempo_acumulado" = time.taken,
+                               "Tempo_total" = tempo_total, "Tempo_total_acumulado" = tempo_total,
+                               "Risco_quad" = tran_prob[tran_prob$Start == 1, ]$Risco,
+                               "Vitimas"= tran_prob[tran_prob$Start == 1, ]$Vitimas,
+                               "Vitimas_acumulado"= tran_prob[tran_prob$Start == 1, ]$Vitimas,
+                               "Vitimas_restante" = Vitimas_inicial - tran_prob[tran_prob$Start == 1, ]$Vitimas,
+                               "'%'_Vitimas_encontradas"= tran_prob[tran_prob$Start == 1, ]$Vitimas / Vitimas_inicial,
+                               "Acuracidade_mod_imagem"= tran_prob[tran_prob$Start == 1, ]$Acuracidade_mod_imagem,
+                               "Flag_mod_imagem"= Flag_mod_imagem,
+                               "Vitimas_identificadas"= tran_prob[tran_prob$Start == 1, ]$Vitimas * Flag_mod_imagem,
+                               "Vitimas_identificadas_acumulado"= tran_prob[tran_prob$Start == 1, ]$Vitimas * Flag_mod_imagem,
+                               "Risco_identificado"= tran_prob[tran_prob$Start == 1, ]$Vitimas * tran_prob[tran_prob$Start == 1, ]$Risco,
+                               "Risco_identificado_acumulado"= tran_prob[tran_prob$Start == 1, ]$Vitimas * tran_prob[tran_prob$Start == 1, ]$Risco,
+                               "Risco_baseline" = Cenario_baseline[n_quadrante],
+                               "Risco_baseline_acumulado" = Cenario_baseline[n_quadrante],
+                               "Cenario" = "1_VANT",
+                               "Sim" = num_sim)
+  } else {
+    Vitimas_encontradas = sum(Base_resposta$Vitimas)
+    Vitimas_identificadas = sum(Base_resposta$Vitimas_identificadas)
+    Flag_mod_imagem = rbinom(n=1, size=1, prob=tran_prob[tran_prob$Start == 1, ]$Acuracidade_mod_imagem)
+    Tempo_acumulado = sum(Base_resposta$Tempo_iteracao) + time.taken
+    Tempo_total_acumulado = sum(Base_resposta$Tempo_total) + tempo_total
+    Baseline_acumulado = sum(Base_resposta$Risco_baseline)
+    Risco_acumulado = sum(Base_resposta$Risco_identificado)
+
+    Base_resposta = rbind(Base_resposta, data.frame(
+      "Estado"=n_state, "Ação"=acao, "Risco" = risco, "Tempo_iteracao" = time.taken,
+      "Tempo_acumulado"=Tempo_acumulado, "Tempo_total" = tempo_total,
+      "Tempo_total_acumulado" = Tempo_total_acumulado, "Risco_quad" = tran_prob[tran_prob$Start == 1, ]$Risco,
+      "Vitimas"= tran_prob[tran_prob$Start == 1, ]$Vitimas,
+      "Vitimas_acumulado"= tran_prob[tran_prob$Start == 1, ]$Vitimas + Vitimas_encontradas,
+      "Vitimas_restante" = Vitimas_inicial - Vitimas_encontradas - tran_prob[tran_prob$Start == 1, ]$Vitimas,
+      "'%'_Vitimas_encontradas"= (tran_prob[tran_prob$Start == 1, ]$Vitimas + Vitimas_encontradas) / Vitimas_inicial,
+      "Acuracidade_mod_imagem"= tran_prob[tran_prob$Start == 1, ]$Acuracidade_mod_imagem,
+      "Flag_mod_imagem"= Flag_mod_imagem,
+      "Vitimas_identificadas"
+
+= tran_prob[tran_prob$Start == 1, ]$Vitimas * Flag_mod_imagem,
+      "Vitimas_identificadas_acumulado"= tran_prob[tran_prob$Start == 1, ]$Vitimas * Flag_mod_imagem + Vitimas_identificadas,
+      "Risco_identificado"= tran_prob[tran_prob$Start == 1, ]$Vitimas * tran_prob[tran_prob$Start == 1, ]$Risco,
+      "Risco_identificado_acumulado"= Risco_acumulado + tran_prob[tran_prob$Start == 1, ]$Vitimas * tran_prob[tran_prob$Start == 1, ]$Risco,
+      "Risco_baseline" = Cenario_baseline[n_quadrante],
+      "Risco_baseline_acumulado" = Baseline_acumulado + Cenario_baseline[n_quadrante],
+      "Cenario" = "1_VANT", "Sim" = num_sim))
+  }
+
+  tran_prob[tran_prob$Start == 1, ]$Risco = 0
+
+  if (sum(tran_prob$Risco) == 0) {
+    acao = 'Fim da missão'
+  } else {
+    if (acao == 'Pular quadrantes') {
+      dir = tran_prob[tran_prob$Risco != 0, ]$State[1]
+    } else {
+      col = paste("Dir_", acao, sep = "")
+      dir = tran_prob[tran_prob$Estado == n_state, ][[col]]
+    }
+  }
+
+  tran_prob$Start = 0
+  if (acao == 'Fim da missão') {
+    print('Mission completed')
+  } else {
+    tran_prob[tran_prob$State == dir, ]$Start = 1
+  }
+
+  tran_prob$Belief = round(tran_prob$Risco / sum(tran_prob$Risco), 20)
+  for (x in 1:length(col_obs_pro)){
+    tran_prob[col_obs_pro[[x]]] = paste("c(", tran_prob$Belief, ",", 1 - tran_prob$Belief, ")", sep = '')
+  }
+
+  print(Base_resposta)
+  n_quadrante = n_quadrante + 1
+  system("TASKKILL /F /im POMDP-~1.EXE")
+  if (sum(tran_prob$Risco) == 0) { break }
+}
+
+Base_resposta$index <- seq.int(nrow(Base_resposta))
+Base_resposta_consolidada = rbind(Base_resposta_consolidada, Base_resposta)
+Base_resposta$Tempo_iteracao = as.numeric(Base_resposta$Tempo_iteracao)
+Base_resposta$Tempo_acumulado = as.numeric(Base_resposta$Tempo_acumulado)
+write.table(Base_resposta, file = paste("C:/Users/pedro/Documents/resposta modelo/resposta_1_vant_", num_sim, ".csv", sep=""), sep=",", dec=".")
+save(Log_UAV, file = "UAV_log_hum_input_solver.rda")
